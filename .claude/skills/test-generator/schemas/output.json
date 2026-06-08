@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TestGeneratorOutput",
+  "type": "object",
+  "required": ["generated_tests", "coverage_expectation"],
+  "properties": {
+    "generated_tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "content", "test_count", "targeted_branches"],
+        "properties": {
+          "file": { "type": "string", "description": "测试文件名" },
+          "content": { "type": "string", "description": "完整测试代码" },
+          "test_count": { "type": "integer", "minimum": 1 },
+          "targeted_branches": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "目标覆盖的分支ID列表"
+          },
+          "test_cases": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "target_branch"],
+              "properties": {
+                "name": { "type": "string" },
+                "target_branch": { "type": "string" },
+                "expected_behavior": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "coverage_expectation": {
+      "type": "object",
+      "required": ["expected_new_branch_coverage", "branches_still_uncovered"],
+      "properties": {
+        "expected_new_branch_coverage": { "type": "number" },
+        "expected_new_line_coverage": { "type": "number" },
+        "branches_still_uncovered": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "notes": { "type": "string" }
+      }
+    },
+    "source_modification_suggestions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "line", "reason", "suggestion"],
+        "properties": {
+          "file": { "type": "string" },
+          "line": { "type": "integer" },
+          "reason": { "type": "string" },
+          "suggestion": { "type": "string" }
+        }
+      }
+    }
+  }
+}
