@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CoverageCheckerOutput",
+  "type": "object",
+  "required": ["file", "summary", "functions"],
+  "properties": {
+    "file": { "type": "string", "description": "源文件名" },
+    "summary": {
+      "type": "object",
+      "required": ["line_coverage_pct", "branch_coverage_pct", "total_branches", "covered_branches", "uncovered_branches"],
+      "properties": {
+        "line_coverage_pct": { "type": "number" },
+        "branch_coverage_pct": { "type": "number" },
+        "total_branches": { "type": "integer" },
+        "covered_branches": { "type": "integer" },
+        "uncovered_branches": { "type": "integer" }
+      }
+    },
+    "delta": {
+      "type": "object",
+      "properties": {
+        "branch_coverage_delta": { "type": "number" },
+        "line_coverage_delta": { "type": "number" },
+        "newly_covered_branches": { "type": "integer" },
+        "newly_uncovered_branches": { "type": "integer" }
+      }
+    },
+    "functions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "line_range", "uncovered_branches"],
+        "properties": {
+          "name": { "type": "string" },
+          "line_range": { "type": "string", "description": "e.g. '45-120'" },
+          "uncovered_branches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["line", "description", "type"],
+              "properties": {
+                "line": { "type": "integer" },
+                "description": { "type": "string" },
+                "type": {
+                  "type": "string",
+                  "enum": ["if_else", "switch_case", "ternary", "loop_condition", "exception_path", "early_return", "other"]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
