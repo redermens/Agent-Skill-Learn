@@ -29,6 +29,8 @@ set -euo pipefail
 #   -d <ip:port>     HDC device address (e.g. 192.168.1.100:8710)
 #   -b <path>        Baseline lcov .info file for coverage comparison
 #   -t <target>      Specific build target (defaults to part name)
+#   -P <product>     Product form (default: rk3568)
+#   -f <files>       Comma-separated source file paths to focus analysis on (relative to OHOS_ROOT)
 #   -i               Install prerequisites first (lcov, pip packages)
 #   -c <percent>     Target coverage threshold for exit message (default: 95)
 #   -h               Show help
@@ -75,20 +77,24 @@ DEVICE_IP=""
 DEVICE_PORT=""
 BASELINE_INFO=""
 BUILD_TARGET=""
+FILES=""
 INSTALL_DEPS=false
 TARGET_COV=95
+PRODUCT_FORM="rk3568"
 
 usage() {
     sed -n 's/^# //p; s/^#$//p' "$0"
     exit 0
 }
 
-while getopts "p:d:b:t:ic:h" opt; do
+while getopts "p:d:b:t:P:f:ic:h" opt; do
     case "$opt" in
         p) PARTS="$OPTARG" ;;
         d) DEVICE_IP="${OPTARG%:*}"; DEVICE_PORT="${OPTARG##*:}" ;;
         b) BASELINE_INFO="$OPTARG" ;;
         t) BUILD_TARGET="$OPTARG" ;;
+        P) PRODUCT_FORM="$OPTARG" ;;
+        f) FILES="$OPTARG" ;;
         i) INSTALL_DEPS=true ;;
         c) TARGET_COV="$OPTARG" ;;
         h) usage ;;
@@ -110,6 +116,8 @@ echo " Parts:           $PARTS"
 echo " Device:          ${DEVICE_IP:-<from config>}:${DEVICE_PORT:-8710}"
 echo " Baseline:        ${BASELINE_INFO:-<none>}"
 echo " Target coverage: ${TARGET_COV}%"
+echo " Product form:    ${PRODUCT_FORM}"
+echo " Target files:    ${FILES:-<none, all files>}"
 echo ""
 
 # --- Validate config/user_config.xml ---
@@ -210,17 +218,14 @@ python3 local_coverage/push_coverage_so/push_coverage.py "testpart" "$PARTS" || 
     echo "    Continuing anyway. Fix device connection and re-run."
 }
 
-# ---- P3: Execute UT via framework ----
+# ---- P3: Execute UT via framework (CLI mode) ----
 echo ">>> [P3] Executing UT..."
-{
-    echo "1"
-    IFS=',' read -ra PART_LIST <<< "$PARTS"
-    for part in "${PART_LIST[@]}"; do
-        echo "run -t UT -tp $part -cov coverage"
-    done
-    echo "quit"
-    echo "exit(0)"
-} | ./start.sh
+cd "$DEVTEST_DIR"
+IFS=',' read -ra PART_LIST <<< "$PARTS"
+for part in "${PART_LIST[@]}"; do
+    echo "    Running: UT -tp $part -cov coverage (product=$PRODUCT_FORM)"
+    ./start.sh run -t UT -tp "$part" -cov coverage -p "$PRODUCT_FORM"
+done
 
 # ---- P4: Pull .gcda from device ----
 echo ">>> [P4] Pulling .gcda from device..."
@@ -293,11 +298,17 @@ if [ -f "$INFO_FILE" ]; then
         BASELINE_ARGS="--baseline $BASELINE_INFO"
     fi
 
+    FILES_ARGS=""
+    if [ -n "$FILES" ]; then
+        FILES_ARGS="--files $FILES"
+    fi
+
     python3 "$SCRIPT_DIR/extract_uncovered.py" \
         --info "$INFO_FILE" \
         --src-root "$OHOS_ROOT" \
         --output "$OUTPUT_JSON" \
         --parts "$PARTS" \
+        $FILES_ARGS \
         $BASELINE_ARGS
 
     echo "    Uncovered report: $OUTPUT_JSON"

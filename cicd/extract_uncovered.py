@@ -227,10 +227,39 @@ def filter_by_part(records, src_root, parts):
     return filtered
 
 
-def build_report(records, src_root, parts=None):
+def filter_by_files(records, src_root, file_list):
+    """Keep only records whose file path matches one of the given source files.
+    
+    file_list: list of relative file paths (e.g. ['foundation/graphic/graphic_2d/src/rect.cpp'])
+    Returns filtered dict with matching records, plus the set of unmatched paths (for warning).
+    """
+    if not file_list:
+        return records, set()
+
+    norm_files = set()
+    unmatched = set()
+    for f in file_list:
+        abs_f = os.path.normpath(os.path.join(src_root, f)) if not os.path.isabs(f) else os.path.normpath(f)
+        norm_files.add(abs_f)
+
+    filtered = {}
+    for file_path, rec in records.items():
+        norm_path = os.path.normpath(file_path)
+        if norm_path in norm_files:
+            filtered[file_path] = rec
+        else:
+            unmatched.add(file_path)
+
+    return filtered, norm_files - set(os.path.normpath(f) for f in filtered)
+
+
+def build_report(records, src_root, parts=None, files=None):
     """Build the full uncovered-branch report."""
     # Apply part filter
     filtered = filter_by_part(records, src_root, parts or [])
+    # Apply file filter on top (overrides part filter narrowing)
+    if files:
+        filtered, _ = filter_by_files(filtered, src_root, files)
 
     summary = compute_metrics(filtered)
 
@@ -280,12 +309,12 @@ def build_report(records, src_root, parts=None):
     return report
 
 
-def compare_baseline(current_records, baseline_path, src_root, parts=None):
+def compare_baseline(current_records, baseline_path, src_root, parts=None, files=None):
     """Compare current .info against a baseline .info and produce delta."""
     baseline_records = parse_lcov_info(baseline_path)
 
-    current_report = build_report(current_records, src_root, parts)
-    baseline_report = build_report(baseline_records, src_root, parts)
+    current_report = build_report(current_records, src_root, parts, files)
+    baseline_report = build_report(baseline_records, src_root, parts, files)
 
     c = current_report['summary']
     b = baseline_report['summary']
@@ -323,6 +352,9 @@ def main():
                         help='Output JSON report path')
     parser.add_argument('--parts', default='',
                         help='Comma-separated part names to filter by')
+    parser.add_argument('--files', default='',
+                        help='Comma-separated source file paths to filter by (relative to src-root). '
+                             'Overrides --parts if both given — only these files are analyzed.')
     parser.add_argument('--baseline', default=None,
                         help='Optional baseline .info file for comparison')
     args = parser.parse_args()
@@ -335,16 +367,21 @@ def main():
         sys.exit(1)
 
     parts = [p.strip() for p in args.parts.split(',') if p.strip()]
+    target_files = [f.strip() for f in args.files.split(',') if f.strip()]
 
     print(f'Parsing {args.info}...')
     records = parse_lcov_info(args.info)
     print(f'  Found {len(records)} source files in coverage data.')
+    if target_files:
+        print(f'  Filtering to {len(target_files)} target file(s):')
+        for f in target_files:
+            print(f'    {f}')
 
-    report = build_report(records, args.src_root, parts)
+    report = build_report(records, args.src_root, parts, target_files)
 
     if args.baseline and os.path.isfile(args.baseline):
         print(f'Comparing against baseline: {args.baseline}')
-        delta = compare_baseline(records, args.baseline, args.src_root, parts)
+        delta = compare_baseline(records, args.baseline, args.src_root, parts, target_files)
         report['baseline_delta'] = delta
         print(f'  Line delta:      {delta["line_delta_pct"]}')
         print(f'  Branch delta:    {delta["branch_delta_pct"]}')

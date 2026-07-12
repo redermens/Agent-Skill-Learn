@@ -1,174 +1,293 @@
 # Coverage Iteration Skill
 
-Use when the user wants to improve code coverage of an OpenHarmony part by analyzing an uncovered-branch report and writing new UT test cases.
+## Subagent Architecture
 
-## Workflow Overview
+Use subagents to isolate context — main agent only orchestrates and keeps summaries.
 
 ```
-P1–P5  →  P6  →  P7  →  repeat
-script     tool    you     (re-run pipeline)
+main_agent
+  ├── @fixer  : PipelineRunner     (runs bash script P1–P6, returns paths + metrics)
+  ├── @oracle : CoverageAnalyzer   (reads JSON + source, produces analysis plan)
+  ├─┬ @fixer  : TestWriter         (writes HWTEST_F cases + updates BUILD.gn)
+  │ └─┬ ...   : TestWriter         (one per file, in parallel)
+  ├── @fixer  : CoverageVerifier   (re-runs pipeline, returns delta)
+  └── loop ←─ until target reached
 ```
 
-- **P1–P5**: Automated by `cicd/coverage_pipeline.sh` (build → push → run → pull → report)
-- **P6**: `cicd/extract_uncovered.py` produces a JSON report of uncovered branches
-- **P7**: **You read the JSON report, write new test cases** ← your main job
-- Repeat: re-run the pipeline to verify coverage improvement, iterate to target
+### Subagent Definitions
 
-## Prerequisites
+#### 1. PipelineRunner (@fixer)
 
-Before running the pipeline, verify:
+| Aspect | Detail |
+|--------|--------|
+| **Input** | `part_name, device_ip:port, product_form, devtest_dir, ohos_root, [baseline_info_path]` |
+| **Command** | `cd <devtest_dir> && ./cicd/coverage_pipeline.sh -p <part> -d <ip:port> -P <product> [-b <baseline>]` |
+| **Output** | Paths: P6 JSON report, lcov .info, HTML dir. Summary metrics: line% and branch% |
+| **Note** | Pure script execution. Capture stdout/stderr, extract key metrics from the summary block. Do NOT return full build logs. |
+| **File-level** | Pass `-f <relative_path>` to focus on a single file. Example: `-f foundation/graphic/graphic_2d/src/rect.cpp` |
 
-1. **Device configured** in `config/user_config.xml`, or pass `-d ip:port` to the pipeline (which auto-writes it)
-2. **Part registered** in `local_coverage/all_subsystem_config.json` — add if missing:
-   ```json
-   "your_part_name": {
-     "name": "your_part_name",
-     "path": ["foundation/your_subsystem/your_component"]
-   }
-   ```
-3. **HDC connected**: `hdc -s <ip>:<port> list targets` shows the device
+**Prompt template:**
 
-The pipeline will check all three and prompt/interrupt if something is wrong.
+```
+Run the coverage pipeline for part {part_name}.
 
-## Step-by-step
+Working directory: {devtest_dir}
+Command: cd {devtest_dir} && ./cicd/coverage_pipeline.sh -p {part_name} -d {device_ip_port} -P {product_form} [-b {baseline_path}] [-f {target_file_path}]
+Timeout: 3600 seconds
 
-### 1. Run the pipeline (once, to get report)
+After completion, return ONLY:
+1. Did it succeed? (yes/no — check for "Pipeline Complete" in output)
+2. Line coverage percentage (e.g. "72.3%")
+3. Branch coverage percentage (e.g. "65.0%")
+4. Path to P6 uncovered report JSON
+5. Path to lcov .info file
+6. Path to HTML report directory
 
-```bash
-# From <OHOS_ROOT>/test/testfwk/developer_test/
-./cicd/coverage_pipeline.sh -p <part_name> -d <device_ip>:8710
+Do NOT return the full build/test output.
 ```
 
-This produces:
-- HTML report: `local_coverage/code_coverage/results/coverage/reports/cxx/html/index.html`
-- Lcov info: `local_coverage/code_coverage/results/coverage/reports/cxx/ohos_codeCoverage.info`
-- P6 analysis: `reports/coverage_analysis/uncovered_report_<timestamp>.json`
+---
 
-### 2. Read the P6 JSON report
+#### 2. CoverageAnalyzer (@oracle)
 
-The report is structured like this:
+| Aspect | Detail |
+|--------|--------|
+| **Input** | P6 JSON report path, OHOS root, part name, devtest dir |
+| **Task** | Read JSON, sort files by uncovered count, read source code for top-N files, read existing test files |
+| **Output** | Structured plan: for each file → list of (branch line, condition, function, suggested test approach) |
 
+**Prompt template:**
+
+```
+Analyze the coverage uncovered report at {p6_report_path}.
+
+OHOS root: {ohos_root}
+Part: {part_name}
+
+The JSON contains per-file uncovered branches. Each has:
+  - file: path relative to OHOS root
+  - line: source line of the branch
+  - function: function name
+  - code: the branching code
+
+Your job:
+1. Read the JSON
+2. Sort files by uncovered_line_count descending
+3. For the top files (those with most uncovered branches):
+   a. Read the source file at <ohos_root>/<file>
+   b. Read each function containing uncovered branches
+   c. Find the existing test file (look for *_test.cpp in the same directory or a tests/ subdirectory)
+   d. Read the existing test file to understand the test suite name and style
+
+Return a structured plan:
 ```json
 {
-  "summary": {
-    "line_rate": "72.3%",
-    "branch_rate": "65.0%",
-    "uncovered_branches": 350,
-    "branch_total": 1000,
-    "branch_hit": 650
-  },
   "files": [
     {
-      "file": "foundation/graphic/graphic_2d/src/rect.cpp",
-      "uncovered_branches": [
+      "source_file": "foundation/graphic/graphic_2d/src/rect.cpp",
+      "test_file": "foundation/graphic/graphic_2d/test/unittest/rect_test.cpp",
+      "test_suite": "RectTest",
+      "uncovered": [
         {
           "line": 42,
-          "block": 1,
-          "branch": 0,
           "function": "Rect::IsValid",
-          "code": "    if (width_ > 0 && height_ > 0) {",
-          "context_before": ["bool Rect::IsValid() const {"],
-          "context_after": ["      return true;", "    }"]
+          "condition": "width_ > 0 && height_ > 0",
+          "false_branch": "when width_ <= 0 OR height_ <= 0",
+          "suggested_test": "Create a Rect with zero/invalid dimensions and call IsValid(), assert false",
+          "context_code_snippet": "bool Rect::IsValid() const {\n    if (width_ > 0 && height_ > 0) {\n        return true;\n    }\n    return false;\n}"
         }
-      ],
-      "uncovered_line_count": 12
+      ]
     }
-  ],
-  "baseline_delta": {
-    "line_delta_pct": "+5.2%",
-    "branch_delta_pct": "+3.8%",
-    "uncovered_branches_delta": -42
-  }
-}
-```
-
-### 3. Prioritize files
-
-Sort `files` by `uncovered_line_count` descending. Start with the file that has the most uncovered lines — it gives the biggest coverage gain per effort.
-
-### 4. For each uncovered branch
-
-1. **Find the source file** — path is relative to `OHOS_ROOT`
-2. **Understand the logic** — read enough of the function to understand what the branch checks
-3. **Locate the existing test file** — look for `<function>_test.cpp` or `<subcomponent>_test.cpp` in the test directory of that part
-4. **Write a test case** following this exact pattern:
-
-```cpp
-/**
- * @tc.name: <Action><3digit>
- * @tc.desc: Cover <condition description>
- * @tc.type:FUNC
- */
-HWTEST_F(<SuiteName>, <Action><3digit>, TestSize.Level1)
-{
-    /**
-     * @tc.steps: step1. <setup>
-     */
-    // Arrange: create objects, set up state
-    auto node = RSCanvasNode::Create();
-    ASSERT_NE(node, nullptr);
-
-    /**
-     * @tc.steps: step2. <trigger condition>
-     */
-    // Act: call the function that triggers the uncovered branch
-
-    /**
-     * @tc.steps: step3. <verify>
-     */
-    // Assert: verify the expected outcome
-    EXPECT_TRUE(...);
-    EXPECT_EQ(...);
-}
-```
-
-**Naming conventions** (from `rs_canvas_node_test.cpp`):
-- Test suite class: `<Component><Type>Test` (PascalCase, e.g. `RSCanvasNodeTest`)
-- Test case name: `<Action><3-digit>` (e.g. `Create001`, `SetandGetBounds001`, `LifeCycle001`)
-- Test file: `<function>_test.cpp` (snake_case)
-- Each variant (edge case) gets its own `NNN` number
-- Use `constexpr static float` constants for boundary values
-
-**Common annotations** (consistent with rs_canvas_node_test.cpp):
-```cpp
-/**
- * @tc.name: <TestName>
- * @tc.desc:
- * @tc.type:FUNC
- */
-```
-
-### 5. Update BUILD.gn
-
-If you created a new test file, add it to the `sources` list in the nearest `BUILD.gn`:
-
-```gn
-ohos_unittest("<SuiteName>") {
-  ...
-  sources = [
-    "existing_test.cpp",
-    "your_new_test.cpp",    # <-- add
   ]
 }
 ```
 
-### 6. Iterate
-
-After writing tests, re-run the pipeline:
-
-```bash
-./cicd/coverage_pipeline.sh -p <part> -d <ip>:8710 -b <prev_info_file>
+Limit to files that would give the most coverage gain per written test.
 ```
 
-The `-b` flag compares against the previous `.info` file so you can see the delta.
+---
 
-Repeat until line coverage reaches the target (default: 95%).
+#### 3. TestWriter (@fixer)
 
-## Constraints & Gotchas
+| Aspect | Detail |
+|--------|--------|
+| **Input** | Analysis for ONE file (source file, test file path, test suite name, uncovered branches list) |
+| **Task** | Write HWTEST_F test cases covering each branch |
+| **Output** | Confirmation of what was written + which files changed |
+| **Isolation** | One subagent per file — runs in parallel |
 
-- **Only modify files under the target part's source tree**, not in `testfwk_developer_test` itself
-- **C++ test files** must use `HWTEST_F` (not `HWTEST`, `HWMTEST_F`, or `HWTEST_P`) for fixtures; `HWTEST` for stateless
-- **`@tc.require`** is optional in some parts (e.g. graphic) — check existing tests in the same directory for the convention. rs_canvas_node_test.cpp omits it.
-- **Use `#include "gtest/gtest.h"`** with quotes, matching the project style
-- If `system_part_service.json` is missing, the pipeline pauses and asks the user to manually pull `.gcda` files
-- Build is incremental: only recompiles changed files, so iterations are fast
+**Prompt template:**
+
+```
+Write test cases for uncovered branches in {source_file}.
+
+Test file: {test_file}
+Test suite: {test_suite}
+Existing test style follows rs_canvas_node_test.cpp conventions.
+
+Uncovered branches to cover:
+{uncovered_json_array}
+
+For each uncovered branch:
+1. Read the source code at {source_file} around the branch line
+2. Read the existing test file at {test_file}
+3. Add a new HWTEST_F test case following this exact pattern:
+
+```cpp
+/**
+ * @tc.name: <FunctionName><3digit>
+ * @tc.desc: Cover: <condition description>
+ * @tc.type:FUNC
+ */
+HWTEST_F(<TestSuite>, <FunctionName><3digit>, TestSize.Level1)
+{
+    /**
+     * @tc.steps: step1. setup
+     */
+    // Arrange
+
+    /**
+     * @tc.steps: step2. trigger
+     */
+    // Act
+
+    /**
+     * @tc.steps: step3. verify
+     */
+    // Assert
+}
+```
+
+Conventions (from rs_canvas_node_test.cpp):
+- #include "gtest/gtest.h" with quotes
+- using namespace testing::ext;
+- Namespace styling matches the source file's namespace
+- Test case naming: <Action><3-digit>, e.g. Create001, IsValid001, InvalidWidth001
+- Use constexpr static for boundary constants
+- Each branch variation gets its own 3-digit number
+- Next available number: check the last test in the file and increment
+
+If the test file doesn't exist yet, create it at {test_file} and add it to the BUILD.gn sources list (look for BUILD.gn in the test directory).
+
+Return what files were modified and what test cases were added.
+```
+
+---
+
+#### 4. CoverageVerifier (@fixer)
+
+| Aspect | Detail |
+|--------|--------|
+| **Input** | Same as PipelineRunner + previous .info path as baseline |
+| **Task** | Re-run pipeline with -b baseline to measure delta |
+| **Output** | New metrics + delta from previous run |
+
+**Prompt template:**
+
+```
+Re-run the coverage pipeline to verify coverage improvement.
+
+Working directory: {devtest_dir}
+Command: cd {devtest_dir} && ./cicd/coverage_pipeline.sh -p {part_name} -d {device_ip_port} -P {product_form} -b {previous_info_path}
+Timeout: 3600 seconds
+
+After completion, return ONLY:
+1. Did it succeed?
+2. New line coverage percentage
+3. New branch coverage percentage
+4. Delta from baseline (both line and branch)
+5. Path to new P6 uncovered report
+```
+
+---
+
+## Main Agent Flow
+
+### Part-level: cover entire part
+
+```
+1. Parse user request
+   ├── part_name (required), e.g. graphic_2d
+   ├── [optional] target_file — if user says "提升某个文件", set this
+   ├── device_ip:port
+   ├── target_coverage (default: 95%)
+   ├── product_form (default: rk3568)
+   └── ohos_root (resolve from devtest_dir)
+```
+
+### File-level: cover a single source file
+
+If the user wants to improve coverage of **one specific file** (e.g. `rect.cpp` in graphic_2d):
+
+- Set `target_file` to the file path relative to OHOS_ROOT
+- The pipeline still builds + pushes + runs tests for the **whole part** (P1–P3 are part-level)
+- But P6 analysis only reports uncovered branches in **that one file**
+- The main agent's flow loop is the same, just focused
+
+File-level is useful when:
+- A new file was just added with low coverage
+- You want to incrementally improve coverage one file at a time
+- The part is large and you want to make focused progress
+
+```
+2. Verify prerequisites
+   ├── devtest_dir/<ohos_root> exists
+   ├── config/user_config.xml has device config (or -d was given)
+   ├── all_subsystem_config.json has the part
+   └── hdc connected
+
+3. Loop until coverage >= target or no progress after iteration
+   ↓
+   ┌────────────────────────────────────────────────────────────┐
+   │ 3a. PipelineRunner  →  get metrics + report paths          │
+   │     (pass -f target_file if file-level)                    │
+   │     ↓                                                      │
+   │ 3b. CoverageAnalyzer →  get analysis plan                  │
+   │     ↓                                                      │
+   │ 3c. TestWriter × N  →  all files in parallel               │
+   │     (one subagent per file, wait for all)                  │
+   │     ↓                                                      │
+   │ 3d. CoverageVerifier →  get new metrics + delta            │
+   │     ↓                                                      │
+   │ 3e. Check: coverage >= target? → break                     │
+   │     Check: delta < 0.5% improvement? → warn and break      │
+   │     Otherwise → loop                                        │
+   └────────────────────────────────────────────────────────────┘
+
+4. Report final summary
+   ├── Final coverage metrics
+   ├── Total test cases written
+   ├── Files modified
+   └── Time taken
+```
+
+## Important
+
+- Each subagent runs as `task(..., background: true)` so main agent stays responsive
+- Only the **main agent** calls subagents — subagents never call other subagents
+- Subagent outputs are compact summaries, not full logs
+- If `system_part_service.json` is missing, the pipeline pauses for manual intervention — inform user
+
+## Prompt Template (for the main agent to use)
+
+### Part-level
+When the user says "提升 <part> 的覆盖率到 X%", load this skill and orchestrate as above.
+When the user says "提升 <part> 的覆盖率" without a target, default to 95%.
+
+Example:
+```
+@skills coverage-iter 提升 graphic_2d 的覆盖率到 95%，设备 192.168.1.100:8710
+```
+
+### File-level
+When the user says "提升 <part> 中的 <relative_path> 文件的覆盖率":
+
+Example:
+```
+@skills coverage-iter 提升 graphic_2d 中 foundation/graphic/graphic_2d/src/rect.cpp 的覆盖率
+```
+
+The main agent should:
+1. Parse the `target_file` from the user message
+2. Pass `-f <target_file>` to PipelineRunner and CoverageVerifier  
+3. The CoverageAnalyzer and TestWriter naturally focus on the single file since the P6 JSON only contains that file's data
